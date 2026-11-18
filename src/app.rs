@@ -1823,11 +1823,13 @@ impl App {
                     }
                 }
             });
-            ui.add_space(8.0);
-            ui.label("Release clause:").on_hover_text("Leave empty for no release clause.");
-            ui.add_enabled_ui(incoming, |ui| ui.add(egui::TextEdit::singleline(&mut self.release).desired_width(110.0)));
         });
         ui.horizontal(|ui| {
+            if !loan {
+                ui.label("Release clause:").on_hover_text("Leave empty for no release clause.");
+                ui.add_enabled_ui(incoming, |ui| ui.add(egui::TextEdit::singleline(&mut self.release).desired_width(110.0)));
+                ui.add_space(12.0);
+            }
             ui.add_enabled_ui(money, |ui| ui.checkbox(&mut self.use_tb, "Pay fee from transfer budget"));
             ui.add_enabled_ui(loan || incoming, |ui| ui.checkbox(&mut self.wait_window, "Wait for transfer window"))
                 .response
@@ -1998,7 +2000,8 @@ impl App {
                     self.renew_end = (end.year, end.month, end.day);
                 }
             }
-            ui.add_space(8.0);
+        });
+        ui.horizontal(|ui| {
             ui.label("Release clause:").on_hover_text("Leave empty for no release clause.");
             ui.add(egui::TextEdit::singleline(&mut self.renew_release).desired_width(110.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
