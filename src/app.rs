@@ -242,6 +242,17 @@ fn round_amount(eur: i64) -> i64 {
     (eur + step / 2) / step * step
 }
 
+/// The budget tab's inputs: amounts in the hundreds of millions stay readable.
+/// `min_size`, not only `desired_width`: inside a `Grid` the field otherwise
+/// shrinks to its text.
+fn budget_field(text: &mut String) -> egui::TextEdit<'_> {
+    egui::TextEdit::singleline(text)
+        .font(egui::FontId::proportional(18.0))
+        .margin(egui::Margin::symmetric(10, 8))
+        .desired_width(320.0)
+        .min_size(egui::vec2(320.0, 0.0))
+}
+
 struct SquadRow {
     player: Player,
     info: PlayerInfo,
@@ -2193,7 +2204,7 @@ impl App {
             }
             egui::Grid::new("budget").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
                 ui.label(format!("Transfer budget ({symbol}):"));
-                ui.add(egui::TextEdit::singleline(&mut self.tb).desired_width(220.0));
+                ui.add(budget_field(&mut self.tb));
                 ui.horizontal(|ui| {
                     for m in [10, 50, 100] {
                         if ui.button(format!("+€{m}m")).clicked() {
@@ -2203,7 +2214,7 @@ impl App {
                 });
                 ui.end_row();
                 ui.label(format!("Salary budget ({symbol}):"));
-                ui.add(egui::TextEdit::singleline(&mut self.sb).desired_width(220.0));
+                ui.add(budget_field(&mut self.sb));
                 ui.horizontal(|ui| {
                     for m in [5, 20] {
                         if ui.button(format!("+€{m}m")).clicked() {
@@ -2245,7 +2256,7 @@ impl App {
             }
             ui.horizontal(|ui| {
                 ui.label("Manager name:");
-                ui.add(egui::TextEdit::singleline(&mut self.manager).desired_width(220.0));
+                ui.add(budget_field(&mut self.manager));
             });
             ui.add_space(8.0);
             if ui.add_enabled(self.busy == 0, theme::primary_button(ui, "Apply name")).clicked() {
