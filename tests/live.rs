@@ -178,7 +178,7 @@ fn edited(dir: &TempDir) -> (MasterLeague, Game) {
 fn budget_and_renewal_reach_the_running_game() {
     let dir = TempDir::new("live-ok");
     let (mut save, game) = edited(&dir);
-    let (plan, count) = save.live_plan(false).unwrap();
+    let (plan, count) = save.live_plan().unwrap();
     let report = live::apply(&plan, &game).unwrap();
     assert_eq!(report, live::Report { flat_copies: 1, renewals: 1, requests_answered: 0, deal_slots: Vec::new() });
 
@@ -194,9 +194,9 @@ fn budget_and_renewal_reach_the_running_game() {
     // In the game now: no undo here, and nothing new to write.
     save.mark_written_to_game(count);
     assert!(save.undo().is_err());
-    assert!(save.live_plan(false).is_err());
+    assert!(save.live_plan().is_err());
     save.set_finances(90_000_000, 30_000_000).unwrap();
-    let (plan, _) = save.live_plan(false).unwrap();
+    let (plan, _) = save.live_plan().unwrap();
     assert!(plan.renewals.is_empty());
     live::apply(&plan, &game).unwrap();
     assert_eq!(game.u32(finance), 900_000);
@@ -206,7 +206,7 @@ fn budget_and_renewal_reach_the_running_game() {
 fn game_that_moved_on_is_left_alone() {
     let dir = TempDir::new("live-moved");
     let (save, game) = edited(&dir);
-    let (plan, _) = save.live_plan(false).unwrap();
+    let (plan, _) = save.live_plan().unwrap();
 
     // The game spent money since the save was written.
     game.put(saved(ml::FL26_FINANCE), &499_000u32.to_le_bytes());
@@ -253,8 +253,7 @@ fn transfers_and_loans_go_to_the_game_as_deals() {
     })
     .unwrap();
 
-    assert!(save.live_plan(false).is_err(), "transfers go into the game only with the beta switch on");
-    let (plan, _) = save.live_plan(true).unwrap();
+    let (plan, _) = save.live_plan().unwrap();
     assert!(plan.flat.is_empty(), "the game charges the fees itself; the save's budget bytes are not written");
     let [sale, signing, loan] = &plan.deals[..] else { panic!("three deals: {:?}", plan.deals) };
     let (salary, end) = managed_terms(0);
@@ -268,7 +267,7 @@ fn transfers_and_loans_go_to_the_game_as_deals() {
 
     // A budget change with deals the game charges would count the fees twice.
     save.set_finances(90_000_000, 30_000_000).unwrap();
-    assert!(save.live_plan(true).is_err());
+    assert!(save.live_plan().is_err());
 }
 
 #[test]
@@ -276,7 +275,7 @@ fn releases_are_not_written_into_the_running_game() {
     let dir = TempDir::new("live-release");
     let mut save = open(&dir);
     save.release(club_player(MANAGED, 0), 0, false, None).unwrap();
-    assert!(save.live_plan(true).is_err());
+    assert!(save.live_plan().is_err());
 }
 
 #[test]
@@ -289,7 +288,7 @@ fn release_clause_and_manager_name_reach_the_running_game() {
     save.renew_contract(player, salary as i64 * 100, end, Some(40_000_000), None).unwrap();
     assert_eq!(save.contract_of(&player).unwrap().release_units, 400_000);
     save.set_manager_name("New Boss").unwrap();
-    let (plan, count) = save.live_plan(false).unwrap();
+    let (plan, count) = save.live_plan().unwrap();
     live::apply(&plan, &game).unwrap();
     save.mark_written_to_game(count);
 
@@ -299,7 +298,7 @@ fn release_clause_and_manager_name_reach_the_running_game() {
 
     // Removing it again.
     save.renew_contract(player, salary as i64 * 100, end, Some(0), None).unwrap();
-    let (plan, _) = save.live_plan(false).unwrap();
+    let (plan, _) = save.live_plan().unwrap();
     live::apply(&plan, &game).unwrap();
     assert_eq!(game.u32(terms_at(RENEWED) + 0x10), 0);
     assert_eq!(game.u32(record_at(RENEWED) + 0x144), 0x0000_0101);
@@ -371,7 +370,7 @@ fn renewal_answers_the_games_open_request() {
     let state_row = save.data.len() - 0x4000 + 0x500 + 8;
     assert_eq!(u32_at(&save.data, state_row), 0, "no longer asked for a renewal");
 
-    let (plan, _) = save.live_plan(false).unwrap();
+    let (plan, _) = save.live_plan().unwrap();
     let report = live::apply(&plan, &game).unwrap();
     assert_eq!(report.requests_answered, 1);
     let today = date(GAME_DATE.0, GAME_DATE.1, GAME_DATE.2).pack();
@@ -413,7 +412,7 @@ fn mod_studio_date_is_found_by_its_calendar() {
     let at = 0x178_9478 - 0x177_FFF0 - 12;
     chunk[at..at + 16].copy_from_slice(&words(&calendar));
     game.add(TABLE + 0x177_FFF0, chunk);
-    let (plan, _) = save.live_plan(false).unwrap();
+    let (plan, _) = save.live_plan().unwrap();
     live::apply(&plan, &game).unwrap();
     assert_eq!(game.u32(saved(ml::FL26_FINANCE)), 800_000);
 }

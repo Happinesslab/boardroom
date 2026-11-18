@@ -20,6 +20,14 @@
   format. No code is included.
 - **pes-file-reader** (leo-grayrat) was used as research reference only (money
   unit, club table, integrity chain). No code is included.
+- **The Gaffer** (RicksTheGaffer): https://github.com/RicksTheGaffer/the-gaffer.
+  Its GafferLive / `memlive.py` measurements on FL26, FL Mod Studio and FL27
+  are the source of where the running game keeps the Master League, player
+  records, contracts, renewal requests and in-game date in memory
+  (`src/live.rs`), and of the release clause field in the contract. Facts
+  only: its repository has no licence, and no code is included. The transfer
+  routines the app calls in the running game were worked out separately from
+  FL_2027.exe, checked against The Gaffer's 28 routine signatures.
 - `data/FL2622wc_players.txt` is the ID/name list shipped with
   FL26 Transfer Editor v0.5.1, and `data/FL2710_players.txt` an ID/name list
   for Football Life 2027. Both are embedded in the binary as fallback name

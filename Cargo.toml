@@ -4,8 +4,7 @@ version = "0.3.2"
 edition = "2024"
 rust-version = "1.89"
 description = "Master League transfer & budget editor for Football Life 2027 / 2026 / PES 2021 saves"
-# The update checker reads releases from this GitHub repository (formerly
-# gvoze32/flmldesk; GitHub redirects the old name for older builds).
+# The update checker reads releases from this GitHub repository.
 repository = "https://github.com/gvoze32/boardroom"
 
 [[bin]]

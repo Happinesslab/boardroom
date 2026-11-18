@@ -2,8 +2,6 @@
 
 A simple Windows app for editing your **Football Life 2027**, **Football Life
 2026** or **PES 2021** Master League save while your career is in progress.
-Formerly **FL ML Desk**: its settings are taken over on the first start;
-backups it made stay in `FLMLDesk_backup`.
 
 What you can do:
 
@@ -130,19 +128,18 @@ exchange rates as the game.
 
 ### Without leaving your Master League
 
-Budget changes, the manager name and contract renewals can go straight into
-the game while your career is loaded there. Signings (also free agents),
-sales, moves between other clubs and loans too, but only with **Live
-transfers (beta)** ticked (next to **Write into running game**; off by
-default): this part is new and hasn't been tried in the game yet. Unticked,
-transfers and loans are saved the usual way (game on the main menu).
+Budget changes, the manager name, contract renewals, signings (also free
+agents), sales, moves between other clubs and loans can go straight into the
+game while your career is loaded there. This is beta: new and not tried in the
+game yet. To save changes the usual way instead, use **Save** with the game on
+the main menu.
 
 1. Save in the game, then open that save in the app (if it was already open,
    open it again). Don't play a day in between.
 2. Make the changes as usual.
-3. Click **Write into running game** at the bottom. The game must be running
-   with this Master League loaded.
-4. Transfers and loans (beta): go back to the game and advance one day. The
+3. Click **Write into running game (beta)** at the bottom. The game must be
+   running with this Master League loaded.
+4. Transfers and loans: go back to the game and advance one day. The
    game agrees them as if you had agreed them there and completes them at the
    end of that day (or when the transfer window opens, if they wait for it):
    the player moves, the fee and wages go through your budget, the news shows
@@ -211,14 +208,10 @@ as administrator too.
   Back up your save folder first and check the changes in the game before you
   save there. Transfers and loans put a small piece of code into the running
   game (at its end-of-day routine) that calls the game's own transfer
-  routines; it only lives until the game is closed. Where the game keeps these
-  values in memory was found by
-  [The Gaffer](https://github.com/RicksTheGaffer/the-gaffer) (FL26, FL Mod
-  Studio and FL27); the transfer routines were worked out from FL_2027.exe.
-- **Release clauses** are stored in the contract (The Gaffer's finding). Up to
-  v0.2.12 the app wrote the transfer fee there for new signings, which gave
-  those players a release clause equal to their fee; renew them to change or
-  remove it.
+  routines; it only lives until the game is closed.
+- **Release clauses** are stored in the contract. Up to v0.2.12 the app wrote
+  the transfer fee there for new signings, which gave those players a release
+  clause equal to their fee; renew them to change or remove it.
 
 ## Credits
 

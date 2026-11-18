@@ -75,7 +75,7 @@ const RENEWAL_STATE_WINDOW: usize = 0x10000;
 
 pub const NATIONAL_FIRST: [&str; 4] = ["ALB", "AND", "ARM", "AUT"];
 const NATIONAL_FIRST_NAMES: [&str; 4] = ["albania", "andorra", "armenia", "austria"];
-/// Backups of overwritten saves, next to the save (FL ML Desk, the app's former name, used `FLMLDesk_backup`).
+/// Backups of overwritten saves, next to the save.
 pub const BACKUP_DIR: &str = "Boardroom_backup";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -680,9 +680,9 @@ impl MasterLeague {
 
     /// What the changes not yet in the running game would write there, and
     /// the number of changes it covers (for `mark_written_to_game`). Budget,
-    /// manager name and contract renewals can go in; transfers and loans too
-    /// when `deals` is set (beta), agreed and completed by the game itself.
-    pub fn live_plan(&self, deals: bool) -> Result<(live::Plan, usize), Error> {
+    /// manager name and contract renewals go in as bytes; transfers and loans
+    /// (beta) as deals the game agrees and completes itself.
+    pub fn live_plan(&self) -> Result<(live::Plan, usize), Error> {
         let pending = &self.history[self.live_written..];
         if pending.is_empty() {
             return Err(Error::new("There are no new changes to write into the game."));
@@ -693,13 +693,6 @@ impl MasterLeague {
             return Err(Error::new(format!(
                 "\"{}\" can't go into the running game: releases and league results can't. Cancel it, or save it \
                  the usual way (game on the main menu).",
-                op.description
-            )));
-        }
-        if let Some(op) = pending.iter().find(|op| !deals && is_deal(&op.redo)) {
-            return Err(Error::new(format!(
-                "\"{}\" goes into the running game only with \"Live transfers (beta)\" ticked. Tick it, or cancel \
-                 it and save it the usual way (game on the main menu).",
                 op.description
             )));
         }

@@ -24,8 +24,6 @@ use crate::theme::{self, Tone};
 const FL26_NAMES: &str = include_str!("../data/FL2622wc_players.txt");
 const FL27_NAMES: &str = include_str!("../data/FL2710_players.txt");
 const SETTINGS_FILE: &str = ".boardroom.json";
-/// Settings file of the app's former name, FL ML Desk; read once if the new one is missing.
-const OLD_SETTINGS_FILE: &str = ".fl-ml-desk.json";
 /// Display currencies use the game's own conversion factors (EUR is the stored base).
 const CURRENCIES: [(&str, f64); 5] = [("EUR €", 1.0), ("GBP £", 0.9), ("CHF", 1.1), ("BRL R$", 4.3), ("JPY ¥", 125.0)];
 /// Full OVR and age ranges of the search filters; a full range filters nothing.
@@ -105,19 +103,12 @@ struct Settings {
     /// Managed club per save path.
     #[serde(default)]
     clubs: HashMap<String, usize>,
-    /// Beta: transfers and loans go into the running game too (off: they are
-    /// saved the usual way, game on the main menu).
-    #[serde(default)]
-    live_deals: bool,
 }
 
 impl Settings {
-    /// The settings, or those of the app's former name (FL ML Desk) on the first start.
     fn load() -> Self {
-        [settings_path(), home().map(|h| h.join(OLD_SETTINGS_FILE))]
-            .into_iter()
-            .flatten()
-            .find_map(|p| std::fs::read_to_string(p).ok())
+        settings_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
     }
@@ -1286,7 +1277,7 @@ impl App {
     /// Write the changes not yet in the game into the running game.
     fn write_to_game(&mut self, ctx: &egui::Context) {
         let Some(game) = self.game.as_ref() else { return };
-        let (plan, count) = match game.live_plan(self.settings.live_deals) {
+        let (plan, count) = match game.live_plan() {
             Ok(p) => p,
             Err(e) => return error_dialog("Can't write into the running game", &e.to_string()),
         };
@@ -1661,27 +1652,16 @@ impl App {
                     }
                 }
                 if ui
-                    .add_enabled(undoable, theme::secondary_button("Write into running game"))
+                    .add_enabled(undoable, theme::secondary_button("Write into running game (beta)"))
                     .on_hover_text(
-                        "Budget, manager name and contract renewals go straight into the game while your Master \
-                         League is loaded there (Windows only). No reload needed. Transfers and loans too when \
-                         \"Live transfers (beta)\" is ticked.",
+                        "Beta, not tried in the game yet. Budget, manager name, contract renewals, transfers and \
+                         loans go straight into the game while your Master League is loaded there (Windows only). \
+                         No reload needed. The game completes transfers and loans at the end of the day.",
                     )
                     .clicked()
                 {
                     let ctx = ui.ctx().clone();
                     self.write_to_game(&ctx);
-                }
-                if ui
-                    .checkbox(&mut self.settings.live_deals, "Live transfers (beta)")
-                    .on_hover_text(
-                        "Ticked: signings, sales and loans also go into the running game; the game completes them \
-                         at the end of the day. Not tried in the game yet. Unticked: they are saved the usual way \
-                         (game on the main menu).",
-                    )
-                    .changed()
-                {
-                    self.settings.store();
                 }
             });
         });
