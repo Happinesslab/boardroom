@@ -191,9 +191,11 @@ struct ResultRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Terms {
     salary_eur: i64,
-    release_eur: Option<i64>,
+    /// Suggested release clause and, from a club, transfer fee: what your club
+    /// asks for similar players. `None` when none of them has a clause.
+    price_eur: Option<i64>,
     years: u16,
-    /// Squad players the salary and clause were taken from, and their OVR range.
+    /// Squad players the terms were taken from, and their OVR range.
     peers: usize,
     ovr_min: i64,
     ovr_max: i64,
@@ -204,19 +206,19 @@ const SUGGEST_PEERS: usize = 5;
 
 /// Normal terms for a player of `overall` at your club, from `squad`
 /// (OVR, yearly salary, release clause; EUR, 0 = no clause): the median salary
-/// of the squad players closest in OVR, their median release clause when most
-/// of them have one, and 3 years (2 from age 30, 1 from age 33). Amounts are
-/// rounded to two significant digits. `None` without squad contracts.
+/// and the median release clause (of those who have one) of the squad players
+/// closest in OVR, and 3 years (2 from age 30, 1 from age 33). The save has no
+/// market value, so the clause also stands for the fee. Amounts are rounded to
+/// two significant digits. `None` without squad contracts.
 fn suggest_terms(overall: i64, age: Option<u32>, squad: &[(i64, i64, i64)]) -> Option<Terms> {
     let mut peers = squad.to_vec();
     peers.sort_by_key(|&(o, ..)| ((o - overall).abs(), -o));
     peers.truncate(SUGGEST_PEERS);
     let salary = median(peers.iter().map(|p| p.1).collect())?;
-    let clauses: Vec<i64> = peers.iter().map(|p| p.2).filter(|&r| r > 0).collect();
-    let release = if clauses.len() * 2 > peers.len() { median(clauses) } else { None };
+    let price = median(peers.iter().map(|p| p.2).filter(|&r| r > 0).collect());
     Some(Terms {
         salary_eur: round_amount(salary),
-        release_eur: release.map(round_amount),
+        price_eur: price.map(round_amount),
         years: match age {
             Some(a) if a >= 33 => 1,
             Some(a) if a >= 30 => 2,
@@ -1017,21 +1019,23 @@ impl App {
         } else if source != Source::Club(mine) {
             self.dest = Some(mine);
             if changed {
-                self.fill_suggested_terms(player);
+                self.fill_suggested_terms(source, player);
             }
         }
     }
 
-    /// Fills salary, contract end and release clause of an incoming player with
-    /// normal terms for your club (`suggest_terms`); clears them when the
-    /// player's OVR or your squad's contracts are unknown.
-    fn fill_suggested_terms(&mut self, player: Player) {
+    /// Fills fee, salary, contract end and release clause of an incoming
+    /// player with normal terms for your club (`suggest_terms`); a player
+    /// without a club costs no fee. Without the player's OVR or your squad's
+    /// contracts nothing is suggested and the amounts are cleared.
+    fn fill_suggested_terms(&mut self, source: Source, player: Player) {
         let info = self.catalog.get(player.player_id);
         let squad: Vec<(i64, i64, i64)> = self
             .squad
             .iter()
             .filter_map(|r| Some((r.info.overall?, r.contract?.annual_eur() as i64, r.contract?.release_units as i64 * 100)))
             .collect();
+        self.fee = "0".into();
         let Some(terms) = info.overall.and_then(|o| suggest_terms(o, info.age, &squad)) else {
             self.salary.clear();
             self.release.clear();
@@ -1039,8 +1043,11 @@ impl App {
             return;
         };
         let end = self.game.as_ref().unwrap().contract_end_in(terms.years);
+        if let (Source::Club(_), Some(p)) = (source, terms.price_eur) {
+            self.fee = self.to_display(p);
+        }
         self.salary = self.to_display(terms.salary_eur);
-        self.release = terms.release_eur.map_or(String::new(), |r| self.to_display(r));
+        self.release = terms.price_eur.map_or(String::new(), |r| self.to_display(r));
         (self.end_year, self.end_month, self.end_day) = (end.year, end.month, end.day);
         self.suggestion = Some(terms);
     }
@@ -1888,7 +1895,7 @@ impl App {
                 (false, true) => "Fee received:",
                 (false, false) => "Transfer fee:",
             })
-            .on_hover_text("The save has no market value to suggest a fee from: enter what you want to pay, 0 for a free agent.");
+            .on_hover_text("Filled in for each player to sign with the median release clause of your similar players (see below); 0 for a player without a club.");
             ui.add_enabled_ui(money, |ui| ui.add(egui::TextEdit::singleline(&mut self.fee).hint_text("e.g. 12.5m").desired_width(130.0)));
             ui.add_space(8.0);
             if loan {
@@ -1925,7 +1932,7 @@ impl App {
         });
         ui.horizontal(|ui| {
             if !loan {
-                ui.label("Release clause:").on_hover_text("Filled in when most of your similar players have one. Leave empty for no release clause.");
+                ui.label("Release clause:").on_hover_text("Filled in with the median release clause of your similar players. Leave empty for no release clause.");
                 ui.add_enabled_ui(incoming, |ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.release).hint_text("empty = none").desired_width(110.0))
                 });
@@ -1957,13 +1964,18 @@ impl App {
     /// Explains where the prefilled terms of an incoming player came from.
     fn suggestion_text(&self) -> String {
         let Some(t) = self.suggestion else {
-            return "No suggestion for this player (his OVR or your squad's contracts are unknown): enter the salary yourself.".into();
+            return "No suggestion for this player (his OVR or your squad's contracts are unknown): enter the fee and salary yourself.".into();
         };
         let ovr = if t.ovr_min == t.ovr_max { t.ovr_min.to_string() } else { format!("{}–{}", t.ovr_min, t.ovr_max) };
-        let clause = t.release_eur.map_or("no release clause".into(), |r| format!("release clause {}", self.to_display(r)));
+        let from_club = matches!(self.selected, Some((Source::Club(_), _)));
+        let price = match (t.price_eur, from_club) {
+            (Some(p), true) => format!("fee and release clause {}", self.to_display(p)),
+            (Some(p), false) => format!("no fee (no club), release clause {}", self.to_display(p)),
+            (None, _) => "no fee or release clause (none of them has a clause)".into(),
+        };
         let years = if t.years == 1 { "1 year".into() } else { format!("{} years", t.years) };
         format!(
-            "Suggested from your {} players with OVR {ovr}: {}/yr, {clause}, {years}. Change anything you like.",
+            "Medians of your {} players with OVR {ovr}: {price}, salary {}/yr, {years}. Change anything you like.",
             t.peers,
             self.to_display(t.salary_eur)
         )
@@ -2605,13 +2617,15 @@ mod tests {
         ];
         let t = suggest_terms(80, Some(24), &squad).unwrap();
         assert_eq!((t.salary_eur, t.peers, t.ovr_min, t.ovr_max), (1_200_000, 5, 78, 82));
-        assert_eq!(t.release_eur, Some(25_000_000), "3 of 5 peers have a clause");
+        assert_eq!(t.price_eur, Some(25_000_000), "median of the peers' clauses, players without one left out");
         assert_eq!(t.years, 3);
         assert_eq!(suggest_terms(80, Some(31), &squad).unwrap().years, 2);
         assert_eq!(suggest_terms(80, Some(34), &squad).unwrap().years, 1);
-        // Mostly no clause among the closest players: suggest none.
-        let few = [(70, 500_000, 0), (71, 600_000, 0), (72, 700_000, 10_000_000)];
-        assert_eq!(suggest_terms(71, None, &few).unwrap().release_eur, None);
+        // One clause among the closest players is still the median of those who have one.
+        let few = [(70, 500_000, 0), (71, 600_000, 0), (72, 700_000, 10_400_000)];
+        assert_eq!(suggest_terms(71, None, &few).unwrap().price_eur, Some(10_000_000));
+        let none = [(70, 500_000, 0), (71, 600_000, 0)];
+        assert_eq!(suggest_terms(71, None, &none).unwrap().price_eur, None);
         assert_eq!(suggest_terms(80, None, &[]), None);
     }
 }

@@ -68,13 +68,13 @@ Go to the [Releases](../../releases) page and download
    **Salary per year** and **Contract until** (or click **+1 yr** to **+5 yr**
    from the in-game date) and, if you want one, a **Release clause** (empty =
    none), then press **Transfer →** below.
-   - Picking a player to sign fills in normal terms for your club: the
-     median **Salary per year** of the 5 players in your squad closest to
-     him in OVR, their median **Release clause** when most of them have one
-     (otherwise none), and a contract of 3 years (2 from age 30, 1 from
-     age 33). The line under the form says which players they came from;
-     change anything you like. The fee isn't suggested: the save has no
-     market value.
+   - Picking a player to sign fills in normal terms for your club, medians
+     of the 5 players in your squad closest to him in OVR: their
+     **Salary per year**, their **Release clause** (of those who have one;
+     none if nobody has) and, as the save has no market value, that clause
+     as the **Transfer fee** too (0 for a player without a club). The
+     contract runs 3 years (2 from age 30, 1 from age 33). The line under
+     the form says which players they came from; change anything you like.
    - You can type amounts like `12,500,000`, `12.5m` or `750k`.
    - **Position**, **OVR** and **Age** narrow the list (players whose OVR or
      age isn't known are hidden while a filter is on). **Export list (CSV)…**
