@@ -86,7 +86,7 @@ pub fn check() -> Result<Option<Release>, Error> {
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(10))).build().into();
     let body = agent
         .get(format!("https://api.github.com/repos/{slug}/releases/latest"))
-        .header("User-Agent", concat!("fl-ml-desk/", env!("CARGO_PKG_VERSION")))
+        .header("User-Agent", concat!("boardroom/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| Error::new(format!("Couldn't check for updates: {e}")))?
@@ -102,8 +102,8 @@ mod tests {
 
     const JSON: &str = r#"{"tag_name":"v0.3.0","html_url":"https://github.com/o/r/releases/tag/v0.3.0",
         "draft":false,"prerelease":false,"assets":[
-        {"name":"FLMLDesk-linux-x64.tar.gz","browser_download_url":"https://x/linux"},
-        {"name":"FLMLDesk-windows-x64.zip","browser_download_url":"https://x/windows"}]}"#;
+        {"name":"Boardroom-linux-x64.tar.gz","browser_download_url":"https://x/linux"},
+        {"name":"Boardroom-windows-x64.zip","browser_download_url":"https://x/windows"}]}"#;
 
     #[test]
     fn newer_tag_offers_platform_asset() {

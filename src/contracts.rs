@@ -49,7 +49,8 @@ const W_TAIL: usize = 6;
 const W_INTERNAL: usize = 7;
 const W_PLAYER: usize = 8;
 const W_SALARY: usize = 9;
-const W_VALUE: usize = 10;
+/// Release clause / 100; 0 = none (The Gaffer, FL26 and FL27).
+const W_RELEASE: usize = 10;
 const W_END: usize = 11;
 /// Offset of the (internal id, player id) pair inside a row.
 const ID_OFFSET: usize = 4 * W_INTERNAL;
@@ -108,7 +109,8 @@ pub struct Contract {
     pub internal_id: u32,
     pub player_id: u32,
     pub salary_units: u32,
-    pub value_units: u32,
+    /// Release clause in units of €100; 0 = no clause.
+    pub release_units: u32,
     pub end: Date,
     pub index: u32,
     pub team: u32,
@@ -173,7 +175,7 @@ fn contract_at(data: &[u8], off: usize) -> Option<Contract> {
             internal_id: t[W_INTERNAL],
             player_id: t[W_PLAYER],
             salary_units: t[W_SALARY],
-            value_units: t[W_VALUE],
+            release_units: t[W_RELEASE],
             end: Date::unpack(t[W_END]).unwrap(),
             index: t[W_INDEX] & 0xFFFF,
             team: t[W_TEAM],
@@ -334,7 +336,9 @@ impl ContractTable {
     }
 
     /// Patch (offset, bytes) giving the player's contract a new yearly salary
-    /// (w9) and end date (w11); every other word of the row is kept.
+    /// (w9), end date (w11) and, when given, release clause (w10); every
+    /// other word of the row is kept.
+    #[allow(clippy::too_many_arguments)]
     pub fn renewal(
         &self,
         data: &[u8],
@@ -342,6 +346,7 @@ impl ContractTable {
         club: usize,
         salary_units: u32,
         end: Date,
+        release_units: Option<u32>,
         today: Date,
     ) -> Result<(usize, Vec<u8>, Contract), Error> {
         let row = self.contracted(data, player, club)?;
@@ -349,6 +354,9 @@ impl ContractTable {
         let mut w = words(data, row.offset).expect("row read above");
         w[W_SALARY] = salary_units;
         w[W_END] = end.pack();
+        if let Some(release) = release_units {
+            w[W_RELEASE] = release;
+        }
         if !is_record(Some(w)) {
             return Err(Error::new("The new contract didn't pass the safety check."));
         }
@@ -362,12 +370,12 @@ impl ContractTable {
         data: &[u8],
         player: &Player,
         salary_units: u32,
-        value_units: u32,
+        release_units: u32,
         end: Date,
         start: Date,
     ) -> Result<(usize, Vec<u8>), Error> {
         let next_index = self.rows(data).iter().map(|c| c.index).filter(|i| *i != NO_INDEX).max().map_or(0, |i| i + 1);
-        self.new_row(data, player, next_index, STATUS_CONTRACTED, start, salary_units, value_units, end)
+        self.new_row(data, player, next_index, STATUS_CONTRACTED, start, salary_units, release_units, end)
     }
 
     /// Patch (offset, bytes) appending a "deal agreed" row (status 4): the
@@ -380,11 +388,11 @@ impl ContractTable {
         player: &Player,
         index: u32,
         salary_units: u32,
-        value_units: u32,
+        release_units: u32,
         end: Date,
         arrival: Date,
     ) -> Result<(usize, Vec<u8>), Error> {
-        self.new_row(data, player, index, STATUS_AGREED, arrival, salary_units, value_units, end)
+        self.new_row(data, player, index, STATUS_AGREED, arrival, salary_units, release_units, end)
     }
 
     /// New row after the last one. Players the game already lists in this
@@ -399,7 +407,7 @@ impl ContractTable {
         status: u8,
         start: Date,
         salary_units: u32,
-        value_units: u32,
+        release_units: u32,
         end: Date,
     ) -> Result<(usize, Vec<u8>), Error> {
         check_terms(salary_units, end, start)?;
@@ -422,7 +430,7 @@ impl ContractTable {
         w[W_INTERNAL] = player.internal_id;
         w[W_PLAYER] = player.player_id;
         w[W_SALARY] = salary_units;
-        w[W_VALUE] = value_units;
+        w[W_RELEASE] = release_units;
         w[W_END] = end.pack();
         if !is_record(Some(w)) {
             return Err(Error::new("The new contract didn't pass the safety check."));

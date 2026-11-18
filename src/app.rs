@@ -6,13 +6,13 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use eframe::egui::{self, RichText, vec2};
 use egui_extras::{Column, TableBuilder};
-use fl_ml_desk::contracts::{Contract, Date};
-use fl_ml_desk::{deals, export};
-use fl_ml_desk::league::{Fixture, MAX_GOALS, Record};
-use fl_ml_desk::masterleague::{LeagueView, LoanRequest, MasterLeague, Player, Source, TransferRequest, fmt_int};
-use fl_ml_desk::players::{PlayerCatalog, PlayerInfo};
-use fl_ml_desk::rating::POSITION_NAMES;
-use fl_ml_desk::{Error, update};
+use boardroom::contracts::{Contract, Date};
+use boardroom::{deals, export};
+use boardroom::league::{Fixture, MAX_GOALS, Record};
+use boardroom::masterleague::{LeagueView, LoanRequest, MasterLeague, Player, Source, TransferRequest, fmt_int};
+use boardroom::players::{PlayerCatalog, PlayerInfo};
+use boardroom::rating::POSITION_NAMES;
+use boardroom::{Error, live, update};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
@@ -23,7 +23,9 @@ use crate::theme::{self, Tone};
 /// Built-in ID/name lists, the fallback under the game folder and EDIT file.
 const FL26_NAMES: &str = include_str!("../data/FL2622wc_players.txt");
 const FL27_NAMES: &str = include_str!("../data/FL2710_players.txt");
-const SETTINGS_FILE: &str = ".fl-ml-desk.json";
+const SETTINGS_FILE: &str = ".boardroom.json";
+/// Settings file of the app's former name, FL ML Desk; read once if the new one is missing.
+const OLD_SETTINGS_FILE: &str = ".fl-ml-desk.json";
 /// Display currencies use the game's own conversion factors (EUR is the stored base).
 const CURRENCIES: [(&str, f64); 5] = [("EUR €", 1.0), ("GBP £", 0.9), ("CHF", 1.1), ("BRL R$", 4.3), ("JPY ¥", 125.0)];
 /// Full OVR and age ranges of the search filters; a full range filters nothing.
@@ -83,8 +85,12 @@ fn parse_amount(text: &str) -> Result<i64, ()> {
     Ok((value * mult).round_ties_even() as i64)
 }
 
+fn home() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from)
+}
+
 fn settings_path() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(|h| PathBuf::from(h).join(SETTINGS_FILE))
+    home().map(|h| h.join(SETTINGS_FILE))
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -99,12 +105,19 @@ struct Settings {
     /// Managed club per save path.
     #[serde(default)]
     clubs: HashMap<String, usize>,
+    /// Beta: transfers and loans go into the running game too (off: they are
+    /// saved the usual way, game on the main menu).
+    #[serde(default)]
+    live_deals: bool,
 }
 
 impl Settings {
+    /// The settings, or those of the app's former name (FL ML Desk) on the first start.
     fn load() -> Self {
-        settings_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
+        [settings_path(), home().map(|h| h.join(OLD_SETTINGS_FILE))]
+            .into_iter()
+            .flatten()
+            .find_map(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
     }
@@ -121,7 +134,18 @@ enum Job {
     /// Loaded names and the file they came from.
     Names { from: NameSource, result: Result<(PlayerCatalog, String), Error> },
     Update { manual: bool, result: Result<Option<update::Release>, Error> },
+    /// Changes written into the running game; `count` = changes it covered,
+    /// `deals` = the names of the transfers and loans in it, in order.
+    Live { count: usize, deals: Vec<String>, result: Result<live::Report, Error> },
+    /// What the game did with the deals at its day end.
+    Deals(Result<DealOutcomes, Error>),
 }
+
+/// Per deal: its name and whether the game completed it (or why not).
+type DealOutcomes = Vec<(String, Result<(), String>)>;
+
+/// How long the app waits for the game's day end to complete armed deals.
+const DEAL_WAIT: std::time::Duration = std::time::Duration::from_secs(3 * 3600);
 
 /// Where a batch of player names came from; the game folder and an EDIT file are setup steps.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -289,6 +313,8 @@ pub struct App {
     tx: Sender<Job>,
     rx: Receiver<Job>,
     busy: usize,
+    /// Changes are being written into the running game.
+    live_busy: bool,
     status: String,
     tab: Tab,
     /// Setup screen (save, club, names) shown instead of the tabs.
@@ -321,6 +347,8 @@ pub struct App {
     dest_filter: String,
     fee: String,
     salary: String,
+    /// Release clause of a signing; empty = none.
+    release: String,
     end_year: u16,
     end_month: u8,
     end_day: u8,
@@ -334,6 +362,8 @@ pub struct App {
     expiring_only: bool,
     renew_salary: String,
     renew_end: (u16, u8, u8),
+    /// Release clause of the renewed contract; empty = none.
+    renew_release: String,
     compensation: String,
     release_use_tb: bool,
     // budget tab
@@ -372,6 +402,7 @@ impl App {
             tx,
             rx,
             busy: 0,
+            live_busy: false,
             status: String::new(),
             tab: Tab::Transfer,
             setup: true,
@@ -395,6 +426,7 @@ impl App {
             dest_filter: String::new(),
             fee: "0".into(),
             salary: String::new(),
+            release: String::new(),
             end_year: 2029,
             end_month: 6,
             end_day: 30,
@@ -407,6 +439,7 @@ impl App {
             expiring_only: false,
             renew_salary: String::new(),
             renew_end: (2029, 6, 30),
+            renew_release: String::new(),
             compensation: "0".into(),
             release_use_tb: true,
             tb: String::new(),
@@ -440,7 +473,7 @@ impl App {
         });
     }
 
-    fn poll_jobs(&mut self) {
+    fn poll_jobs(&mut self, ctx: &egui::Context) {
         while let Ok(job) = self.rx.try_recv() {
             match job {
                 Job::Open(result) => {
@@ -475,6 +508,79 @@ impl App {
                         }
                         Err(e) if manual => self.fail("Check for updates", &e),
                         _ => {}
+                    }
+                }
+                Job::Live { count, deals, result } => {
+                    self.busy -= 1;
+                    self.live_busy = false;
+                    match result {
+                        Ok(report) => {
+                            if let Some(game) = self.game.as_mut() {
+                                game.mark_written_to_game(count);
+                            }
+                            self.status = "Written into the running game. Save in the game to keep it.".into();
+                            let mut done = Vec::new();
+                            if report.flat_copies > 0 {
+                                done.push("budget or manager name".to_string());
+                            }
+                            if report.renewals > 0 {
+                                done.push(format!("{} contract renewal(s)", report.renewals));
+                            }
+                            let answered = match report.requests_answered {
+                                0 => String::new(),
+                                n => format!(" {n} of them answered the game's renewal request, as \"Accept Terms\" does."),
+                            };
+                            let mut text = if done.is_empty() {
+                                String::new()
+                            } else {
+                                format!("The game now has the new {}.{answered}\n\n", done.join(" and "))
+                            };
+                            if !report.deal_slots.is_empty() {
+                                text += &format!(
+                                    "{} transfer(s) or loan(s) agreed. Go back to the game and advance one day: the \
+                                     game completes them at the end of the day (or on their arrival date), and \
+                                     this app tells you when it has.\n\n",
+                                    report.deal_slots.len()
+                                );
+                                self.status = "Advance one day in the game to complete the deals.".into();
+                                self.watch_deals(ctx, report.deal_slots, deals);
+                            }
+                            text += "Check it in the game, then save there as usual. Saving this file here as well \
+                                     is not needed.";
+                            MessageDialog::new().set_title("Written into the game").set_description(text).show();
+                        }
+                        Err(e) => self.fail("Couldn't write into the running game", &e),
+                    }
+                }
+                Job::Deals(result) => {
+                    match result {
+                        Ok(outcomes) => {
+                            let failed: Vec<String> = outcomes
+                                .iter()
+                                .filter_map(|(name, r)| r.as_ref().err().map(|e| format!("{name}: {e}")))
+                                .collect();
+                            if failed.is_empty() {
+                                self.status = format!("The game completed {} deal(s). Save in the game.", outcomes.len());
+                                MessageDialog::new()
+                                    .set_title("Deals completed")
+                                    .set_description(format!(
+                                        "The game completed {} transfer(s)/loan(s). Check them in the game, then save \
+                                         there.",
+                                        outcomes.len()
+                                    ))
+                                    .show();
+                            } else {
+                                self.fail(
+                                    "Deals not completed",
+                                    &Error::new(format!(
+                                        "The game didn't complete:\n{}\n\nDon't save in the game: load your last save \
+                                         there and open it here again.",
+                                        failed.join("\n")
+                                    )),
+                                );
+                            }
+                        }
+                        Err(e) => self.fail("Deals in the running game", &e),
                     }
                 }
             }
@@ -725,22 +831,41 @@ impl App {
         let Some(c) = self.squad.iter().find(|r| r.player == player).and_then(|r| r.contract) else { return };
         self.renew_salary = self.to_display(c.annual_eur() as i64);
         self.renew_end = (c.end.year, c.end.month, c.end.day);
+        self.renew_release = self.release_text(&c);
         self.compensation = "0".into();
+    }
+
+    /// The contract's release clause as the form shows it; empty = none.
+    fn release_text(&self, c: &Contract) -> String {
+        match c.release_units {
+            0 => String::new(),
+            u => self.to_display(u as i64 * 100),
+        }
     }
 
     fn is_expiring(row: &SquadRow) -> bool {
         row.months_left.is_some_and(|m| m < EXPIRING_MONTHS)
     }
 
+    /// An optional amount: empty = none (0).
+    fn optional_amount(&self, text: &str) -> Result<i64, ()> {
+        if text.trim().is_empty() { Ok(0) } else { self.from_display(text) }
+    }
+
     fn renew(&mut self) {
         let Some(player) = self.squad_selected else { return };
         let (y, m, d) = self.renew_end;
-        let (Ok(salary), Some(end)) = (self.from_display(&self.renew_salary), Date::new(y, m, d)) else {
-            error_dialog("Invalid details", "Check the salary and contract date.");
+        let (Ok(salary), Some(end), Ok(release)) =
+            (self.from_display(&self.renew_salary), Date::new(y, m, d), self.optional_amount(&self.renew_release))
+        else {
+            error_dialog("Invalid details", "Check the salary, contract date and release clause.");
             return;
         };
+        // An untouched clause stays exactly as it is (no currency rounding).
+        let current = self.squad.iter().find(|r| r.player == player).and_then(|r| r.contract);
+        let release = (current.map(|c| self.release_text(&c)).as_deref() != Some(self.renew_release.trim())).then_some(release);
         let name = self.catalog.get(player.player_id).name;
-        let result = self.game.as_mut().unwrap().renew_contract(player, salary, end, Some(&name)).map(|_| ());
+        let result = self.game.as_mut().unwrap().renew_contract(player, salary, end, release, Some(&name)).map(|_| ());
         self.applied(result);
     }
 
@@ -930,11 +1055,12 @@ impl App {
             if mode == Mode::In {
                 req.salary_eur = Some(self.from_display(&self.salary)?);
                 req.contract_end = Some(Date::new(self.end_year, self.end_month, self.end_day).ok_or(())?);
+                req.release_clause_eur = Some(self.optional_amount(&self.release)?);
             }
             Ok(())
         })();
         if parsed.is_err() {
-            error_dialog("Invalid details", "Check the fee, salary and contract date.");
+            error_dialog("Invalid details", "Check the fee, salary, contract date and release clause.");
             return;
         }
         let game = self.game.as_mut().unwrap();
@@ -1041,6 +1167,78 @@ impl App {
         }
     }
 
+    /// Executables to look for besides the known ones: those in the game folder.
+    fn game_exes(&self) -> Vec<String> {
+        self.settings
+            .game_folder
+            .as_deref()
+            .and_then(|f| std::fs::read_dir(f).ok())
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.to_ascii_lowercase().ends_with(".exe"))
+            .collect()
+    }
+
+    /// Write the changes not yet in the game into the running game.
+    fn write_to_game(&mut self, ctx: &egui::Context) {
+        let Some(game) = self.game.as_ref() else { return };
+        let (plan, count) = match game.live_plan(self.settings.live_deals) {
+            Ok(p) => p,
+            Err(e) => return error_dialog("Can't write into the running game", &e.to_string()),
+        };
+        let deals_note = if plan.deals.is_empty() {
+            String::new()
+        } else {
+            "\n\nTransfers and loans are agreed in the game and completed by it at the end of the day (advance one \
+             day), or on their arrival date. Back up your save folder first: this is new."
+                .to_string()
+        };
+        if !confirm(
+            "Write into the running game",
+            &format!(
+                "Write the new changes straight into the game?\n\nThe game must be in this Master League, loaded \
+                 from this save, with no day played since it was saved. Afterwards, check the changes in the game \
+                 and save there as usual.{deals_note}"
+            ),
+        ) {
+            return;
+        }
+        let extra = self.game_exes();
+        let deals: Vec<String> = plan.deals.iter().map(|d| d.label.clone()).collect();
+        self.live_busy = true;
+        self.status = "Writing into the running game…".into();
+        self.spawn(ctx, move || Job::Live { count, deals, result: live::write_to_game(&plan, &extra) });
+    }
+
+    /// Wait in the background (without blocking the app) until the game's
+    /// day end has completed or refused the deals in these request slots.
+    fn watch_deals(&mut self, ctx: &egui::Context, slots: Vec<u32>, names: Vec<String>) {
+        let extra = self.game_exes();
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let outcome = loop {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                match live::deal_results(&slots, &extra) {
+                    Ok(r) if r.iter().all(Option::is_some) => {
+                        break Ok(names.into_iter().zip(r.into_iter().map(Option::unwrap)).collect());
+                    }
+                    Ok(_) if started.elapsed() < DEAL_WAIT => {}
+                    Ok(_) => {
+                        break Err(Error::new(
+                            "No day has ended in the game for hours. The deals still wait there and complete at its \
+                             next day end.",
+                        ));
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
+            let _ = tx.send(Job::Deals(outcome));
+            ctx.request_repaint();
+        });
+    }
+
     // --- layout ---------------------------------------------------------------------
     fn header(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
@@ -1048,7 +1246,7 @@ impl App {
             ui.add(egui::Image::from_texture(egui::load::SizedTexture::from_handle(&self.logo)).fit_to_exact_size(vec2(44.0, 44.0)));
             ui.vertical(|ui| {
                 ui.add_space(2.0);
-                ui.label(RichText::new("FL ML Desk").heading().strong().color(theme::accent(ui)));
+                ui.label(RichText::new("Boardroom").heading().strong().color(theme::accent(ui)));
                 ui.label(RichText::new("Master League transfers, contracts, budget & league results · Football Life 2027 / 2026 / PES 2021").color(theme::muted(ui)));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1312,9 +1510,12 @@ impl App {
     fn bottom_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         let pending = self.game.as_ref().is_some_and(|g| !g.history.is_empty());
+        // Changes already in the running game can't be undone here.
+        let in_game = self.game.as_ref().map_or(0, |g| g.written_to_game());
+        let undoable = !self.live_busy && self.game.as_ref().is_some_and(|g| g.history.len() > in_game);
         ui.horizontal(|ui| {
             theme::section_title(ui, "Unsaved changes");
-            if ui.add_enabled(pending, egui::Button::new("↶ Undo last change")).clicked() {
+            if ui.add_enabled(undoable, egui::Button::new("↶ Undo last change")).clicked() {
                 let game = self.game.as_mut().unwrap();
                 match game.undo() {
                     Ok(text) => self.status = format!("Undone: {text}"),
@@ -1322,12 +1523,16 @@ impl App {
                 }
                 self.after_change();
             }
-            if ui.add_enabled(pending, egui::Button::new("✖ Cancel all changes")).clicked()
+            if ui.add_enabled(undoable, egui::Button::new("✖ Cancel all changes")).clicked()
                 && confirm("Cancel changes", "Discard all unsaved changes? The save file is not touched.")
             {
                 let game = self.game.as_mut().unwrap();
                 while game.undo().is_ok() {}
-                self.status = "All unsaved changes cancelled.".into();
+                self.status = if game.history.is_empty() {
+                    "All unsaved changes cancelled.".into()
+                } else {
+                    "Changes cancelled, except those already in the running game.".into()
+                };
                 self.after_change();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1344,12 +1549,36 @@ impl App {
                     if confirm(
                         "Save",
                         &format!(
-                            "Overwrite {name}?\nThe old file is backed up to the FLMLDesk_backup folder. Make sure the \
-                             game is closed or on the main menu."
+                            "Overwrite {name}?\nThe old file is backed up to the {} folder. Make sure the game is \
+                             closed or on the main menu.",
+                            boardroom::masterleague::BACKUP_DIR
                         ),
                     ) {
                         self.save(None);
                     }
+                }
+                if ui
+                    .add_enabled(undoable, theme::secondary_button("Write into running game"))
+                    .on_hover_text(
+                        "Budget, manager name and contract renewals go straight into the game while your Master \
+                         League is loaded there (Windows only). No reload needed. Transfers and loans too when \
+                         \"Live transfers (beta)\" is ticked.",
+                    )
+                    .clicked()
+                {
+                    let ctx = ui.ctx().clone();
+                    self.write_to_game(&ctx);
+                }
+                if ui
+                    .checkbox(&mut self.settings.live_deals, "Live transfers (beta)")
+                    .on_hover_text(
+                        "Ticked: signings, sales and loans also go into the running game; the game completes them \
+                         at the end of the day. Not tried in the game yet. Unticked: they are saved the usual way \
+                         (game on the main menu).",
+                    )
+                    .changed()
+                {
+                    self.settings.store();
                 }
             });
         });
@@ -1358,8 +1587,12 @@ impl App {
             if let Some(g) = &self.game {
                 for (index, op) in g.operations().into_iter().enumerate() {
                     ui.horizontal(|ui| {
-                        if ui.add(theme::remove_button(ui)).on_hover_text("Cancel this change").clicked() {
+                        let removable = !self.live_busy && index >= g.written_to_game();
+                        if ui.add_enabled(removable, theme::remove_button(ui)).on_hover_text("Cancel this change").clicked() {
                             cancel = Some(index);
+                        }
+                        if index < g.written_to_game() {
+                            theme::chip(ui, Tone::Ok, "In game");
                         }
                         ui.label(op);
                     });
@@ -1590,6 +1823,9 @@ impl App {
                     }
                 }
             });
+            ui.add_space(8.0);
+            ui.label("Release clause:").on_hover_text("Leave empty for no release clause.");
+            ui.add_enabled_ui(incoming, |ui| ui.add(egui::TextEdit::singleline(&mut self.release).desired_width(110.0)));
         });
         ui.horizontal(|ui| {
             ui.add_enabled_ui(money, |ui| ui.checkbox(&mut self.use_tb, "Pay fee from transfer budget"));
@@ -1675,10 +1911,11 @@ impl App {
             .column(Column::exact(48.0))
             .column(Column::initial(130.0))
             .column(Column::initial(110.0))
+            .column(Column::initial(110.0))
             .column(Column::exact(90.0))
             .column(Column::exact(80.0))
             .header(22.0, |mut header| {
-                for title in ["Player", "Pos", "Age", "OVR", "Salary/yr", "Contract until", "Months left", "ID"] {
+                for title in ["Player", "Pos", "Age", "OVR", "Salary/yr", "Contract until", "Release clause", "Months left", "ID"] {
                     header.col(|ui| {
                         ui.strong(title);
                     });
@@ -1696,6 +1933,10 @@ impl App {
                         opt(r.info.overall),
                         r.contract.map_or("no contract".into(), |c| self.to_display(c.annual_eur() as i64)),
                         r.contract.map_or("on loan?".into(), |c| c.end.to_string()),
+                        r.contract.map_or(String::new(), |c| match c.release_units {
+                            0 => "none".into(),
+                            u => self.to_display(u as i64 * 100),
+                        }),
                         opt(r.months_left),
                         r.player.player_id.to_string(),
                     ];
@@ -1757,6 +1998,9 @@ impl App {
                     self.renew_end = (end.year, end.month, end.day);
                 }
             }
+            ui.add_space(8.0);
+            ui.label("Release clause:").on_hover_text("Leave empty for no release clause.");
+            ui.add(egui::TextEdit::singleline(&mut self.renew_release).desired_width(110.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add_enabled(self.busy == 0, theme::primary_button(ui, "Apply contract")).clicked() {
                     self.renew();
@@ -2145,7 +2389,8 @@ fn logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.poll_jobs();
+        let ctx = ui.ctx().clone();
+        self.poll_jobs(&ctx);
         let dropped = ui.ctx().input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()).filter(|p| p.is_file()));
         if let Some(path) = dropped
             && self.busy == 0

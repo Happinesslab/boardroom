@@ -168,7 +168,8 @@ pub struct AgreedDeal {
     pub seller_ref: Option<u32>,
     pub fee_units: u32,
     pub salary_units: u32,
-    pub value_units: u32,
+    /// Release clause in units of €100; 0 = none.
+    pub release_units: u32,
     pub end: Date,
     /// In-game date the deal is agreed on.
     pub today: Date,
@@ -391,7 +392,7 @@ impl DealTables {
             return Err(Error::new("No free contract number is left."));
         }
 
-        let mut patches = vec![table.agreed(data, &p, index, deal.salary_units, deal.value_units, deal.end, deal.arrival)?];
+        let mut patches = vec![table.agreed(data, &p, index, deal.salary_units, deal.release_units, deal.end, deal.arrival)?];
         let pair = match (offer_id, deal.seller_ref) {
             (Some(offer_id), Some(seller_ref)) => {
                 let offer = [

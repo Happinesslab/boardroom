@@ -1,11 +1,11 @@
 mod common;
 
 use common::*;
-use fl_ml_desk::contracts::{BLANK, RECORD};
-use fl_ml_desk::crypto;
-use fl_ml_desk::deals;
-use fl_ml_desk::masterleague::{self as ml, Finances, LoanRequest, MasterLeague, Source, TransferRequest};
-use fl_ml_desk::playerdb as pdb;
+use boardroom::contracts::{BLANK, RECORD};
+use boardroom::crypto;
+use boardroom::deals;
+use boardroom::masterleague::{self as ml, Finances, LoanRequest, MasterLeague, Source, TransferRequest};
+use boardroom::playerdb as pdb;
 
 fn open_with(dir: &TempDir, data: Vec<u8>) -> MasterLeague {
     let path = write_save(&dir.0.join("ML00000001"), data);
@@ -18,7 +18,7 @@ fn open(dir: &TempDir) -> MasterLeague {
     open_with(dir, build_data(false))
 }
 
-fn incoming(source: usize, pid: u32, fee: i64, salary: i64, end: fl_ml_desk::contracts::Date) -> TransferRequest {
+fn incoming(source: usize, pid: u32, fee: i64, salary: i64, end: boardroom::contracts::Date) -> TransferRequest {
     TransferRequest {
         fee_eur: fee,
         salary_eur: Some(salary),
@@ -128,7 +128,8 @@ fn unrecognised_lists_fall_back_to_joining_right_away() {
     // Appended after the last row (squad + negotiation); the row before it is untouched.
     assert_eq!(c.offset, FIRST_ROW + (SQUAD + 1) * RECORD);
     assert_eq!(words(&game.data, c.offset - RECORD), words(&original, c.offset - RECORD));
-    assert_eq!((c.salary_units, c.value_units, c.end), (25_000, 123_457, date(2029, 8, 31)));
+    // No release clause unless one is asked for.
+    assert_eq!((c.salary_units, c.release_units, c.end), (25_000, 0, date(2029, 8, 31)));
     assert_eq!((c.index, c.team, c.status, c.start), (NEGOTIATION_INDEX + 1, team_ref(MANAGED), 5, Some(date(2025, 8, 6))));
     assert_eq!(&words(&game.data, c.offset)[4..7], &[0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF]);
     assert_eq!(words(&game.data, c.offset + RECORD), BLANK);
@@ -172,7 +173,7 @@ fn agreed_deal_waits_for_the_game_to_move_the_player() {
     let (iid, pid) = (target.internal_id, target.player_id);
     assert_eq!(
         words(&game.data, FIRST_ROW + (SQUAD + 1) * RECORD),
-        [index, team_ref(MANAGED), 4, arrival, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF, iid, pid, 25_000, 123_457, date(2029, 8, 31).pack()]
+        [index, team_ref(MANAGED), 4, arrival, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF, iid, pid, 25_000, 0, date(2029, 8, 31).pack()]
     );
     let offers = FIRST_ROW + deals::OFFERS_OFFSET;
     let (nc, nj) = NEGOTIATING;
@@ -251,7 +252,7 @@ fn deal_agreed_outside_the_window_waits_for_it_to_open_unless_asked_not_to() {
     assert_eq!(agreed_on(&game, 2), [(4, date(2025, 10, 11).pack()); 2]);
 }
 
-fn loan(club: usize, outgoing: bool, pid: u32, fee: i64, end: fl_ml_desk::contracts::Date) -> LoanRequest {
+fn loan(club: usize, outgoing: bool, pid: u32, fee: i64, end: boardroom::contracts::Date) -> LoanRequest {
     LoanRequest {
         club,
         outgoing,
@@ -421,7 +422,7 @@ fn renewal_changes_only_salary_and_end_of_the_row() {
     let off = FIRST_ROW + 4 * RECORD;
     let (before, row_before, records_before) = (game.data.clone(), words(&game.data, off), game.records.clone());
     let wages = game.wage_bill_eur();
-    game.renew_contract(player, 2_500_049, date(2030, 6, 30), Some("Renewed")).unwrap();
+    game.renew_contract(player, 2_500_049, date(2030, 6, 30), None, Some("Renewed")).unwrap();
     let row = words(&game.data, off);
     assert_eq!(row[9], 25_000, "salary rounded to €100 units");
     assert_eq!(row[11], date(2030, 6, 30).pack());
@@ -587,7 +588,7 @@ fn unreadable_records_lock_moves_but_not_agreed_deals() {
     let seller = club_player(MANAGED, 2);
     assert!(game.transfer(TransferRequest::new(Source::Club(MANAGED), 7, seller.player_id)).is_err());
     assert!(game.release(seller, 0, false, None).is_err());
-    assert!(game.renew_contract(seller, 1_000_000, date(2030, 6, 30), None).is_err());
+    assert!(game.renew_contract(seller, 1_000_000, date(2030, 6, 30), None, None).is_err());
     assert_eq!(game.data, before);
     game.transfer(agreed(7, club_player(7, 2).player_id)).unwrap();
 }
@@ -598,7 +599,7 @@ fn saved_records_are_recompressed_and_tables_found_again() {
     let mut game = open(&dir);
     let (seller, renewed) = (club_player(MANAGED, 2), club_player(MANAGED, 4));
     game.transfer(TransferRequest::new(Source::Club(MANAGED), 7, seller.player_id)).unwrap();
-    game.renew_contract(renewed, 2_500_000, date(2030, 6, 30), None).unwrap();
+    game.renew_contract(renewed, 2_500_000, date(2030, 6, 30), None, None).unwrap();
     let records = game.records.clone();
     let size_before = game.data.len();
     game.write(None).unwrap();
@@ -607,7 +608,7 @@ fn saved_records_are_recompressed_and_tables_found_again() {
     assert_eq!(game.records, records);
     assert_eq!(game.contract_count(), SQUAD - 1, "contract table found again after the save");
     // Another edit on the reloaded state, saved and opened from disk.
-    game.renew_contract(renewed, 3_000_000, date(2030, 6, 30), None).unwrap();
+    game.renew_contract(renewed, 3_000_000, date(2030, 6, 30), None, None).unwrap();
     game.write(None).unwrap();
     let mut again = MasterLeague::open(&game.path).unwrap();
     again.set_managed_team(MANAGED).unwrap();
@@ -622,10 +623,10 @@ fn renewal_must_end_after_game_date_and_change_something() {
     let mut game = open(&dir);
     let player = club_player(MANAGED, 1);
     let before = game.data.clone();
-    assert!(game.renew_contract(player, 1_000_000, date(2025, 8, 6), None).is_err());
+    assert!(game.renew_contract(player, 1_000_000, date(2025, 8, 6), None, None).is_err());
     let c = game.contract_of(&player).unwrap();
-    assert!(game.renew_contract(player, c.annual_eur() as i64, c.end, None).is_err());
-    assert!(game.renew_contract(club_player(7, 1), 1_000_000, date(2030, 6, 30), None).is_err(), "AI player");
+    assert!(game.renew_contract(player, c.annual_eur() as i64, c.end, None, None).is_err());
+    assert!(game.renew_contract(club_player(7, 1), 1_000_000, date(2030, 6, 30), None, None).is_err(), "AI player");
     assert_eq!(game.data, before);
     assert!(game.operations().is_empty());
 }

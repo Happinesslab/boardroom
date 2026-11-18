@@ -158,6 +158,12 @@ impl PlayerDb {
         ok.then_some(PlayerDb { start, end, chunks, records })
     }
 
+    /// Offset of the container in the data block; the running game keeps most
+    /// of what lies before it byte for byte (`live`).
+    pub fn start(&self) -> usize {
+        self.start
+    }
+
     /// Offset of the player's record in `records`, after checking it is his.
     pub fn record(&self, records: &[u8], p: &Player) -> Result<usize, Error> {
         let off = (p.internal_id & 0xFFFF) as usize * RECORD;

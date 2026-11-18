@@ -1,7 +1,9 @@
-# FL ML Desk
+# Boardroom
 
 A simple Windows app for editing your **Football Life 2027**, **Football Life
 2026** or **PES 2021** Master League save while your career is in progress.
+Formerly **FL ML Desk**: its settings are taken over on the first start;
+backups it made stay in `FLMLDesk_backup`.
 
 What you can do:
 
@@ -15,8 +17,9 @@ What you can do:
   The loan is agreed like in the game and the player moves on the next
   in-game day; his contract stays with the club that loans him out.
 - **Move players between other (AI) clubs.**
-- **Renew contracts:** give a player of your club a new yearly salary and
-  contract end date.
+- **Renew contracts:** give a player of your club a new yearly salary,
+  contract end date and release clause, also when the game has asked you to
+  renew him.
 - **Release players:** end a contract without a new club, optionally paying a
   compensation from your transfer budget.
 - **See your squad's contracts:** salaries, end dates, contracts ending within
@@ -28,19 +31,23 @@ What you can do:
 - **Turn a league match into a win.** After a league match is over (played
   or skipped in the game), pick it and set a winning score; the league table is
   recalculated.
+- **Write changes into the running game**, without going back to the main
+  menu and loading the save again: budget, manager name, contract renewals,
+  and signings, sales and loans (the game itself completes those at the end
+  of the day).
 
 The app tells you when a new version is available.
 
 ## Download
 
 Go to the [Releases](../../releases) page and download
-`FLMLDesk-vX.Y.Z-windows-x64.exe`. Nothing to install: just open it.
+`Boardroom-vX.Y.Z-windows-x64.exe`. Nothing to install: just open it.
 
 ## How to use
 
 1. In the game, save your Master League and **go back to the main menu or close
    the game**.
-2. Open `FLMLDesk-vX.Y.Z-windows-x64.exe`.
+2. Open `Boardroom-vX.Y.Z-windows-x64.exe`.
 3. The app starts on **Get started**. Click **Open ML save…**, or drag your
    save file onto the window. Saves are in
    `Documents\KONAMI\eFootball PES 2021 SEASON UPDATE\<folder>\save\`
@@ -59,7 +66,8 @@ Go to the [Releases](../../releases) page and download
      tabs brings this screen back.
 6. **Player transfers** tab: search for a player, fill in **Transfer fee**,
    **Salary per year** and **Contract until** (or click **+1 yr** to **+5 yr**
-   from the in-game date), then press **Transfer →** below.
+   from the in-game date) and, if you want one, a **Release clause** (empty =
+   none), then press **Transfer →** below.
    - You can type amounts like `12,500,000`, `12.5m` or `750k`.
    - **Position**, **OVR** and **Age** narrow the list (players whose OVR or
      age isn't known are hidden while a filter is on). **Export list (CSV)…**
@@ -83,8 +91,12 @@ Go to the [Releases](../../releases) page and download
      transfer window** is unticked.
 7. **My squad & contracts** tab: your players sorted by contract end; contracts
    ending within 12 months are highlighted. Select a player:
-   - **Apply contract** sets the new **Salary per year** and **Contract until**
-     (**+1 yr** to **+5 yr** from the in-game date).
+   - **Apply contract** sets the new **Salary per year**, **Contract until**
+     (**+1 yr** to **+5 yr** from the in-game date) and **Release clause**
+     (empty = none). A player who refused to renew no longer leaves when his
+     contract ends. If the game has asked you to renew him (an open renewal
+     request), the new contract answers that request like **Accept Terms**
+     and can only go into the running game (see below).
    - **Release player** ends his contract and takes him out of your squad.
      **Remaining salary** fills in what is still owed until the contract ends;
      with **Pay from transfer budget** it is taken from the budget.
@@ -98,7 +110,7 @@ Go to the [Releases](../../releases) page and download
    main menu. Then select the played match, set **Your goals** higher than
    **Opponent's goals** and press **Make it a win**. The score and the table
    (points, wins/draws/losses, goals, positions) change.
-10. Click **Save**. A copy of your old save is kept in the `FLMLDesk_backup`
+10. Click **Save**. A copy of your old save is kept in the `Boardroom_backup`
     folder next to it, just in case.
 11. Load the save in the game and check your squad, finances and league table.
 
@@ -108,6 +120,39 @@ depends on (for example the move of a player you then moved again) can only
 be cancelled after that later one.
 **Currency** only changes how amounts are shown and typed; it uses the same
 exchange rates as the game.
+
+### Without leaving your Master League
+
+Budget changes, the manager name and contract renewals can go straight into
+the game while your career is loaded there. Signings (also free agents),
+sales, moves between other clubs and loans too, but only with **Live
+transfers (beta)** ticked (next to **Write into running game**; off by
+default): this part is new and hasn't been tried in the game yet. Unticked,
+transfers and loans are saved the usual way (game on the main menu).
+
+1. Save in the game, then open that save in the app (if it was already open,
+   open it again). Don't play a day in between.
+2. Make the changes as usual.
+3. Click **Write into running game** at the bottom. The game must be running
+   with this Master League loaded.
+4. Transfers and loans (beta): go back to the game and advance one day. The
+   game agrees them as if you had agreed them there and completes them at the
+   end of that day (or when the transfer window opens, if they wait for it):
+   the player moves, the fee and wages go through your budget, the news shows
+   the deal. The app tells you when the game has done it.
+5. Check the changes in the game, then save in the game as usual.
+
+Changes written this way show **In game** in the list of changes and can't be
+undone in the app; make a new change instead. Releases and league results
+still need the usual way (**Save**, with the game on the main menu). A budget
+change can't go in together with deals the game charges to your budget: write
+it on its own. The app refuses and writes nothing when the game holds
+different values than the opened save, for example after a day has passed, or
+when the game's code isn't the one the app knows (other game versions, or
+another tool such as The Gaffer's live deals already hooked into the same
+place). It looks for `FL_2027.exe`, `FL_2026.exe`, `PES2021.exe` and the
+programs in your game folder. If the game runs as administrator, start the app
+as administrator too.
 
 ## Good to know
 
@@ -155,6 +200,18 @@ exchange rates as the game.
   again by the app; none has been loaded in the game after editing yet. Check
   your squad, budget and league table in the game. For FL27 player names, OVR
   and ages, choose the FL27 game folder (step 4).
+- **Writing into the running game** has not been tried in the game yet.
+  Back up your save folder first and check the changes in the game before you
+  save there. Transfers and loans put a small piece of code into the running
+  game (at its end-of-day routine) that calls the game's own transfer
+  routines; it only lives until the game is closed. Where the game keeps these
+  values in memory was found by
+  [The Gaffer](https://github.com/RicksTheGaffer/the-gaffer) (FL26, FL Mod
+  Studio and FL27); the transfer routines were worked out from FL_2027.exe.
+- **Release clauses** are stored in the contract (The Gaffer's finding). Up to
+  v0.2.12 the app wrote the transfer fee there for new signings, which gave
+  those players a release clause equal to their fee; renew them to change or
+  remove it.
 
 ## Credits
 

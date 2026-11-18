@@ -1,7 +1,7 @@
 mod common;
 
 use common::*;
-use fl_ml_desk::masterleague::MasterLeague;
+use boardroom::masterleague::MasterLeague;
 
 const MATCHES_AT: usize = 0x20_0000;
 const LEAGUE_AT: usize = 0x30_0000;

@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use fl_ml_desk::contracts::{BLANK, Date};
-use fl_ml_desk::crypto::{self, FILE_HEADER_SIZE, SaveFile};
-use fl_ml_desk::deals;
-use fl_ml_desk::masterleague as ml;
-use fl_ml_desk::playerdb as pdb;
+use boardroom::contracts::{BLANK, Date};
+use boardroom::crypto::{self, FILE_HEADER_SIZE, SaveFile};
+use boardroom::deals;
+use boardroom::masterleague as ml;
+use boardroom::playerdb as pdb;
 
 pub const CLUBS: usize = 450;
 pub const NATIONAL: usize = 100;
@@ -311,7 +311,7 @@ impl TempDir {
     pub fn new(tag: &str) -> Self {
         static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fl-ml-desk-{tag}-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("boardroom-{tag}-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         TempDir(dir)
     }

@@ -41,7 +41,7 @@ use crate::contracts::{Contract, ContractTable, Date, SALARY_UNIT, STATUS_AGREED
 use crate::deals::{self, AgreedDeal, DealTables, LoanDeal};
 use crate::league::{Fixture, League, Standing};
 use crate::playerdb::{self, Move, PlayerDb};
-use crate::{Error, crypto};
+use crate::{Error, crypto, live};
 
 pub const TABLE_START: usize = 0x50;
 pub const RECORD_SIZE: usize = 0x690;
@@ -70,10 +70,13 @@ pub const MY_TEAM_ROW: usize = 16;
 const MY_TEAM_ROWS: usize = 64;
 const MY_TEAM_FREE: u32 = 0xC7;
 pub const MONEY_UNIT: i64 = 100;
+/// Bytes at the end of the data block searched for a player's renewal state row.
+const RENEWAL_STATE_WINDOW: usize = 0x10000;
 
 pub const NATIONAL_FIRST: [&str; 4] = ["ALB", "AND", "ARM", "AUT"];
 const NATIONAL_FIRST_NAMES: [&str; 4] = ["albania", "andorra", "armenia", "austria"];
-pub const BACKUP_DIR: &str = "FLMLDesk_backup";
+/// Backups of overwritten saves, next to the save (FL ML Desk, the app's former name, used `FLMLDesk_backup`).
+pub const BACKUP_DIR: &str = "Boardroom_backup";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Team {
@@ -124,13 +127,16 @@ pub struct Operation {
     patches: Vec<(usize, Vec<u8>)>,
     /// Same for the player records.
     record_patches: Vec<(usize, Vec<u8>)>,
+    /// Answers a request the game has open (a renewal request): only the
+    /// running game can take it (`live`), not the file.
+    live_only: bool,
 }
 
 #[derive(Clone, Debug)]
 enum Redo {
     Transfer(TransferRequest),
     Loan(LoanRequest),
-    Renew { player: Player, salary_eur: i64, end: Date, name: Option<String> },
+    Renew { player: Player, salary_eur: i64, end: Date, release_eur: Option<i64>, name: Option<String> },
     Release { player: Player, compensation_eur: i64, use_transfer_budget: bool, name: Option<String> },
     Finances { transfer_eur: i64, salary_eur: i64 },
     Manager(String),
@@ -145,6 +151,8 @@ pub struct TransferRequest {
     pub fee_eur: i64,
     pub salary_eur: Option<i64>,
     pub contract_end: Option<Date>,
+    /// Release clause of an incoming player's new contract; `None` = no clause.
+    pub release_clause_eur: Option<i64>,
     /// Charge (incoming) or credit (outgoing) the fee to the transfer budget.
     pub use_transfer_budget: bool,
     /// An incoming deal waits for the next transfer window when it is closed;
@@ -162,6 +170,7 @@ impl TransferRequest {
             fee_eur: 0,
             salary_eur: None,
             contract_end: None,
+            release_clause_eur: None,
             use_transfer_budget: true,
             wait_for_window: true,
             name: None,
@@ -196,6 +205,14 @@ pub fn div_round_even(value: i64, divisor: i64) -> i64 {
 
 pub fn eur_to_units(eur: i64) -> i64 {
     div_round_even(eur, MONEY_UNIT)
+}
+
+/// A release clause in the contract's units (€100); 0 = no clause.
+fn release_units(eur: i64) -> Result<u32, Error> {
+    u32::try_from(eur_to_units(eur))
+        .ok()
+        .filter(|u| *u < 0x8000_0000)
+        .ok_or_else(|| Error::new("The release clause is too high or negative."))
 }
 
 pub fn fmt_int(value: i64) -> String {
@@ -254,6 +271,9 @@ pub struct MasterLeague {
     /// Why the player records can't be read; selling, releasing, renewing and
     /// moving players between other clubs need them.
     pub players_error: Option<String>,
+    /// The first `live_written` changes in `history` are already in the
+    /// running game (`live`); they can't be undone or cancelled here.
+    live_written: usize,
 }
 
 impl MasterLeague {
@@ -292,6 +312,7 @@ impl MasterLeague {
             players: None,
             records: Vec::new(),
             players_error: None,
+            live_written: 0,
         };
         game.teams = game.discover_clubs()?;
         game.national = game.discover_national_teams()?;
@@ -533,7 +554,13 @@ impl MasterLeague {
     }
 
     fn begin(&mut self, redo: Redo) {
-        self.current = Some(Operation { description: String::new(), redo, patches: Vec::new(), record_patches: Vec::new() });
+        self.current = Some(Operation {
+            description: String::new(),
+            redo,
+            patches: Vec::new(),
+            record_patches: Vec::new(),
+            live_only: false,
+        });
     }
 
     fn commit(&mut self, description: String) -> &Operation {
@@ -565,10 +592,16 @@ impl MasterLeague {
     }
 
     pub fn undo(&mut self) -> Result<String, Error> {
+        if self.history.len() <= self.live_written && !self.history.is_empty() {
+            return Err(Error::new(Self::IN_GAME));
+        }
         let op = self.history.pop().ok_or_else(|| Error::new("Nothing to undo."))?;
         self.revert(&op);
         Ok(op.description)
     }
+
+    const IN_GAME: &str = "That change is already in the running game and can't be undone here. Make a new change \
+                           instead (for example set the old budget again).";
 
     /// Cancel the `index`-th unsaved change and keep the later ones: undo back
     /// to it, then do the later ones again on top. If one of them no longer
@@ -577,6 +610,9 @@ impl MasterLeague {
     pub fn cancel(&mut self, index: usize) -> Result<String, Error> {
         if index >= self.history.len() {
             return Err(Error::new("That change no longer exists."));
+        }
+        if index < self.live_written {
+            return Err(Error::new(Self::IN_GAME));
         }
         let before = (self.data.clone(), self.records.clone(), self.history.clone());
         let later = self.history.split_off(index + 1);
@@ -603,12 +639,15 @@ impl MasterLeague {
         match redo.clone() {
             Redo::Transfer(req) => self.transfer(req).map(|_| ()),
             Redo::Loan(req) => self.loan(req).map(|_| ()),
-            Redo::Renew { player, salary_eur, end, name } => {
+            Redo::Renew { player, salary_eur, end, release_eur, name } => {
                 let units = u32::try_from(div_round_even(salary_eur, SALARY_UNIT as i64)).ok();
-                if self.contract_of(&player).is_some_and(|c| Some(c.salary_units) == units && c.end == end) {
+                let release = release_eur.map(|e| u32::try_from(div_round_even(e, SALARY_UNIT as i64)).ok());
+                if self.contract_of(&player).is_some_and(|c| {
+                    Some(c.salary_units) == units && c.end == end && release.is_none_or(|r| r == Some(c.release_units))
+                }) {
                     return Ok(());
                 }
-                self.renew_contract(player, salary_eur, end, name.as_deref()).map(|_| ())
+                self.renew_contract(player, salary_eur, end, release_eur, name.as_deref()).map(|_| ())
             }
             Redo::Release { player, compensation_eur, use_transfer_budget, name } => {
                 self.release(player, compensation_eur, use_transfer_budget, name.as_deref()).map(|_| ())
@@ -632,6 +671,216 @@ impl MasterLeague {
 
     pub fn operations(&self) -> Vec<&str> {
         self.history.iter().map(|o| o.description.as_str()).collect()
+    }
+
+    /// How many of the changes in `operations()` are already in the running game.
+    pub fn written_to_game(&self) -> usize {
+        self.live_written
+    }
+
+    /// What the changes not yet in the running game would write there, and
+    /// the number of changes it covers (for `mark_written_to_game`). Budget,
+    /// manager name and contract renewals can go in; transfers and loans too
+    /// when `deals` is set (beta), agreed and completed by the game itself.
+    pub fn live_plan(&self, deals: bool) -> Result<(live::Plan, usize), Error> {
+        let pending = &self.history[self.live_written..];
+        if pending.is_empty() {
+            return Err(Error::new("There are no new changes to write into the game."));
+        }
+        let is_deal = |r: &Redo| matches!(r, Redo::Transfer(_) | Redo::Loan(_));
+        let supported = |r: &Redo| matches!(r, Redo::Finances { .. } | Redo::Manager(_) | Redo::Renew { .. }) || is_deal(r);
+        if let Some(op) = pending.iter().find(|op| !supported(&op.redo)) {
+            return Err(Error::new(format!(
+                "\"{}\" can't go into the running game: releases and league results can't. Cancel it, or save it \
+                 the usual way (game on the main menu).",
+                op.description
+            )));
+        }
+        if let Some(op) = pending.iter().find(|op| !deals && is_deal(&op.redo)) {
+            return Err(Error::new(format!(
+                "\"{}\" goes into the running game only with \"Live transfers (beta)\" ticked. Tick it, or cancel \
+                 it and save it the usual way (game on the main menu).",
+                op.description
+            )));
+        }
+        // The save as the game has it: before the pending changes.
+        let mut before = self.data.clone();
+        for op in pending.iter().rev() {
+            for (offset, old) in op.patches.iter().rev() {
+                before[*offset..offset + old.len()].copy_from_slice(old);
+            }
+        }
+        // The running game keeps (most of) the data before the player records byte for byte.
+        let flat_end = self.players.as_ref().map_or(playerdb::MIN_START, PlayerDb::start);
+        let mut changed = Vec::new();
+        let mut renewed: Vec<(Player, Option<String>)> = Vec::new();
+        let mut deals = Vec::new();
+        for op in pending {
+            match &op.redo {
+                Redo::Renew { player, name, .. } => {
+                    renewed.retain(|(p, _)| p != player);
+                    renewed.push((*player, name.clone()));
+                }
+                // The game does the whole move itself, money included; the
+                // bytes this change wrote into the save are not written.
+                Redo::Transfer(req) => deals.push(self.live_transfer(req, &before)?),
+                Redo::Loan(req) => deals.push(self.live_loan(req)?),
+                _ => {
+                    for (offset, old) in &op.patches {
+                        if offset + old.len() > flat_end {
+                            return Err(Error::new(format!(
+                                "\"{}\" changes a part of the save the running game doesn't keep as it is; save it \
+                                 the usual way (game on the main menu).",
+                                op.description
+                            )));
+                        }
+                        changed.extend((*offset..offset + old.len()).filter(|&o| before[o] != self.data[o]));
+                    }
+                }
+            }
+        }
+        if deals.iter().any(|d: &live::Deal| d.user) && pending.iter().any(|op| matches!(op.redo, Redo::Finances { .. })) {
+            return Err(Error::new(
+                "A budget change and a deal that the game charges to your budget can't go into the game together. \
+                 Write the budget change on its own first (cancel the deals, write, then make them again).",
+            ));
+        }
+        let mut plan = live::Plan {
+            game_date: self.game_date,
+            flat: live::FlatChange::group(&before, &self.data, &changed),
+            renewals: Vec::new(),
+            deals,
+        };
+        for (player, name) in renewed {
+            let label = name.unwrap_or_else(|| format!("ID {}", player.player_id));
+            // Renewals need the managed club's table, so both are set.
+            let (Some(table), Some(club)) = (self.contracts.as_ref(), self.managed_team) else {
+                return Err(Error::new("First choose the club you manage."));
+            };
+            let rows = table.find(&before, &player);
+            let old = rows.iter().find(|c| c.status == crate::contracts::STATUS_CONTRACTED && c.club_index() == club);
+            let (Some(old), Some(new)) = (old, self.contract_of(&player)) else {
+                return Err(Error::new(format!("{label}: the contract can't be read; nothing was written.")));
+            };
+            if (old.salary_units, old.end, old.release_units) != (new.salary_units, new.end, new.release_units) {
+                plan.renewals.push(live::Renewal {
+                    label,
+                    player_id: player.player_id,
+                    old_salary: old.salary_units,
+                    old_end: old.end,
+                    old_release: old.release_units,
+                    salary: new.salary_units,
+                    end: new.end,
+                    release: new.release_units,
+                    request_open: Self::request_open(&rows, club),
+                    state_set: renewal_state(&before, &player).is_some(),
+                });
+            }
+        }
+        if plan.flat.is_empty() && plan.renewals.is_empty() && plan.deals.is_empty() {
+            return Err(Error::new("The new changes give the same values the game already has; nothing to write."));
+        }
+        Ok((plan, self.history.len()))
+    }
+
+    /// When a deal agreed now completes in the game: at the next day end, or
+    /// when the transfer window opens if it should wait for it.
+    fn live_date(&self, wait_for_window: bool) -> Option<Date> {
+        let today = self.game_date?;
+        (wait_for_window && !deals::in_window(today)).then(|| deals::arrival_date(today, true))
+    }
+
+    /// A transfer the game agrees and completes itself. The new contract is
+    /// the one asked for (incoming), or the one he has now (sales and moves
+    /// between other clubs keep his terms, as in the save).
+    fn live_transfer(&self, req: &TransferRequest, before: &[u8]) -> Result<live::Deal, Error> {
+        let (Some(table), Some(mine)) = (self.contracts.as_ref(), self.managed_team) else {
+            return Err(Error::new("First choose the club you manage."));
+        };
+        let label = req.name.clone().unwrap_or_else(|| format!("ID {}", req.player_id));
+        let seller = match req.source {
+            Source::Club(i) => Some(i as u32),
+            Source::Others => None,
+        };
+        let (salary, end, release) = match (req.salary_eur, req.contract_end) {
+            (Some(salary), Some(end)) if req.dest == mine => (
+                u32::try_from(div_round_even(salary, SALARY_UNIT as i64)).unwrap_or(0),
+                end,
+                release_units(req.release_clause_eur.unwrap_or(0))?,
+            ),
+            _ => {
+                let club = seller.ok_or_else(|| Error::new(format!("{label}: a player without a club can only join your club.")))?;
+                let now = table
+                    .rows(before)
+                    .into_iter()
+                    .find(|c| c.player_id == req.player_id && c.status == crate::contracts::STATUS_CONTRACTED && c.club_index() == club as usize)
+                    .ok_or_else(|| Error::new(format!("{label}: his contract wasn't found in the save; nothing was written.")))?;
+                (now.salary_units, now.end, now.release_units)
+            }
+        };
+        Ok(live::Deal {
+            kind: if seller.is_some() { live::DealKind::Transfer } else { live::DealKind::FreeAgent },
+            player_id: req.player_id,
+            buyer: req.dest as u32,
+            seller,
+            fee: u32::try_from(eur_to_units(req.fee_eur)).unwrap_or(0),
+            salary,
+            end,
+            release,
+            loan_end: None,
+            date: if req.dest == mine { self.live_date(req.wait_for_window) } else { None },
+            user: req.use_transfer_budget && (req.dest == mine || seller == Some(mine as u32)),
+            label,
+        })
+    }
+
+    /// A loan the game agrees and completes itself; his contract stays with the parent club.
+    fn live_loan(&self, req: &LoanRequest) -> Result<live::Deal, Error> {
+        let mine = self.managed_team.ok_or_else(|| Error::new("First choose the club you manage."))? as u32;
+        let (buyer, seller) = if req.outgoing { (req.club as u32, mine) } else { (mine, req.club as u32) };
+        Ok(live::Deal {
+            label: req.name.clone().unwrap_or_else(|| format!("ID {}", req.player_id)),
+            kind: live::DealKind::Loan,
+            player_id: req.player_id,
+            buyer,
+            seller: Some(seller),
+            fee: u32::try_from(eur_to_units(req.fee_eur)).unwrap_or(0),
+            salary: 0,
+            end: req.loan_end,
+            release: 0,
+            loan_end: Some(req.loan_end),
+            date: self.live_date(req.wait_for_window),
+            user: req.use_transfer_budget,
+        })
+    }
+
+    /// The game has a renewal request of the managed club open for the
+    /// player: a negotiation row (status 1–3) of that club in `rows`.
+    fn request_open(rows: &[Contract], club: usize) -> bool {
+        rows.iter().any(|c| (1..=3).contains(&c.status) && c.club_index() == club)
+    }
+}
+
+/// The game's renewal state row of the player: 16 bytes `(internal id,
+/// player id, state, 0)` about 15 KB before the end of the data block, one
+/// per player of the managed squad; 1 = renewal requested, 3 = refused (he
+/// leaves when the contract ends). -> offset of the state word when it is
+/// set, and only when exactly one such row exists.
+fn renewal_state(data: &[u8], player: &Player) -> Option<usize> {
+    let from = data.len().saturating_sub(RENEWAL_STATE_WINDOW);
+    let mut key = player.internal_id.to_le_bytes().to_vec();
+    key.extend(player.player_id.to_le_bytes());
+    let found: Vec<usize> = memchr::memmem::find_iter(&data[from..], &key)
+        .map(|i| from + i + 8)
+        .filter(|&o| o + 8 <= data.len() && (1..=3).contains(&u32_at(data, o)) && u32_at(data, o + 4) == 0)
+        .collect();
+    (found.len() == 1).then(|| found[0])
+}
+
+impl MasterLeague {
+    /// The first `count` changes are now in the running game.
+    pub fn mark_written_to_game(&mut self, count: usize) {
+        self.live_written = self.live_written.max(count.min(self.history.len()));
     }
 
     fn shirt_numbers(&self, index: usize) -> Vec<u16> {
@@ -948,7 +1197,8 @@ impl MasterLeague {
                     parts.push(format!("fee {}", fmt_eur(req.fee_eur)));
                 }
                 let units = u32::try_from(div_round_even(salary_eur, SALARY_UNIT as i64)).unwrap_or(0);
-                let value = u32::try_from(eur_to_units(req.fee_eur)).unwrap_or(0);
+                let fee = u32::try_from(eur_to_units(req.fee_eur)).unwrap_or(0);
+                let release = release_units(req.release_clause_eur.unwrap_or(0))?;
                 let salary = fmt_eur(units as i64 * SALARY_UNIT as i64);
                 let table = g.contracts.clone().unwrap();
                 // An agreed deal: the game moves the player on the next day,
@@ -965,9 +1215,9 @@ impl MasterLeague {
                                 Source::Club(seller) => Some(u32_at(&g.data, Self::base(seller))),
                                 Source::Others => None,
                             },
-                            fee_units: value,
+                            fee_units: fee,
                             salary_units: units,
-                            value_units: value,
+                            release_units: release,
                             end,
                             today,
                             arrival,
@@ -988,7 +1238,7 @@ impl MasterLeague {
                         ));
                     }
                     Err(_) => {
-                        let (offset, record) = table.signing(&g.data, &player, units, value, end, today)?;
+                        let (offset, record) = table.signing(&g.data, &player, units, release, end, today)?;
                         g.patch(offset, &record);
                         new_contract = Some((units, end));
                         parts.push(format!("salary {salary}/yr until {end}"));
@@ -1130,34 +1380,63 @@ impl MasterLeague {
         self.club_roster(club).into_iter().map(|p| (p, self.contract_of(&p))).collect()
     }
 
-    /// New yearly salary and end date for a player under contract with the managed club.
-    pub fn renew_contract(&mut self, player: Player, salary_eur: i64, end: Date, name: Option<&str>) -> Result<&Operation, Error> {
+    /// New yearly salary, end date and (when given; 0 = none) release clause
+    /// for a player under contract with the managed club. When the game has
+    /// a renewal request open for him, the change answers it and can only go
+    /// into the running game (`live`).
+    pub fn renew_contract(
+        &mut self,
+        player: Player,
+        salary_eur: i64,
+        end: Date,
+        release_eur: Option<i64>,
+        name: Option<&str>,
+    ) -> Result<&Operation, Error> {
         let (club, table, today) = self.contract_context()?;
         if salary_eur < 0 {
             return Err(Error::new("The salary can't be negative."));
         }
         let units = u32::try_from(div_round_even(salary_eur, SALARY_UNIT as i64)).unwrap_or(u32::MAX);
+        let release = release_eur.map(release_units).transpose()?;
         let old = self.contract_of(&player).ok_or_else(|| Error::new("This player's contract couldn't be found; nothing was changed."))?;
-        if old.salary_units == units && old.end == end {
+        if old.salary_units == units && old.end == end && release.is_none_or(|r| r == old.release_units) {
             return Err(Error::new("Nothing was changed."));
         }
+        let request_open = Self::request_open(&table.find(&self.data, &player), club);
+        let state = renewal_state(&self.data, &player);
         let label = name.map_or_else(|| format!("ID {}", player.player_id), str::to_string);
-        let redo = Redo::Renew { player, salary_eur, end, name: name.map(str::to_string) };
+        let redo = Redo::Renew { player, salary_eur, end, release_eur, name: name.map(str::to_string) };
         self.atomic(redo, move |g| {
-            let (offset, bytes, _) = table.renewal(&g.data, &player, club, units, end, today)?;
+            let (offset, bytes, _) = table.renewal(&g.data, &player, club, units, end, release, today)?;
             g.patch(offset, &bytes);
             // The player's record mirrors the contract's salary and end date.
             g.update_record(&player, |r| Ok(playerdb::renewed(r, units, end)))?;
-            let new = g.contract_of(&player).filter(|c| c.salary_units == units && c.end == end);
-            if new.is_none() {
-                return Err(Error::new("Final check failed: the new contract can't be read."));
+            // As after "Accept Terms" in the game: no renewal request open, no
+            // longer leaving when the contract ends.
+            if let Some(o) = state {
+                g.patch(o, &0u32.to_le_bytes());
             }
-            Ok(format!(
+            g.current.as_mut().unwrap().live_only = request_open;
+            let new = g.contract_of(&player).filter(|c| {
+                c.salary_units == units && c.end == end && release.is_none_or(|r| r == c.release_units)
+            });
+            let Some(new) = new else {
+                return Err(Error::new("Final check failed: the new contract can't be read."));
+            };
+            let clause = |u: u32| if u == 0 { "none".to_string() } else { fmt_eur(u as i64 * SALARY_UNIT as i64) };
+            let mut text = format!(
                 "{label}: contract {}/yr until {} → {}/yr until {end}",
                 fmt_eur(old.annual_eur() as i64),
                 old.end,
                 fmt_eur(units as i64 * SALARY_UNIT as i64)
-            ))
+            );
+            if new.release_units != old.release_units {
+                text += &format!("; release clause {} → {}", clause(old.release_units), clause(new.release_units));
+            }
+            if request_open {
+                text += " (answers the game's renewal request: running game only)";
+            }
+            Ok(text)
         })
     }
 
@@ -1312,6 +1591,13 @@ impl MasterLeague {
         if !self.changes_are_journaled() {
             return Err(Error::new("Unexpected changes found in the save; nothing was saved."));
         }
+        if let Some(op) = self.history.iter().find(|op| op.live_only) {
+            return Err(Error::new(format!(
+                "\"{}\" answers a request the game has open, so it can only go into the running game (Write into \
+                 running game, then save in the game). Cancel it to save the other changes to the file.",
+                op.description
+            )));
+        }
         let mut save = self.save.clone();
         let edited = self.players.as_ref().filter(|db| db.records != self.records);
         save.data = match edited {
@@ -1366,6 +1652,7 @@ impl MasterLeague {
             self.data = written.data.clone();
             self.save = written;
             self.history.clear();
+            self.live_written = 0;
             self.load_players();
             if let Some(club) = self.managed_team {
                 self.contracts = ContractTable::detect(&self.data, club, &self.club_roster(club)).ok();
