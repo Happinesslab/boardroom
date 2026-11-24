@@ -368,6 +368,7 @@ impl MasterLeague {
             let (d, m, y) = (parts.next()??, parts.next()??, parts.next()??);
             Date::new(y, u8::try_from(m).ok()?, u8::try_from(d).ok()?)
         });
+        self.game_date = self.game_date.or_else(|| text.lines().nth(1).and_then(|l| { let p: Vec<u16> = l.trim().split('/').filter_map(|x| x.trim().parse().ok()).collect(); if p.len() == 3 && p[0] > 31 { Date::new(p[0], u8::try_from(p[1]).ok()?, u8::try_from(p[2]).ok()?) } else { None } }));
     }
 
     // --- discovery -----------------------------------------------------
